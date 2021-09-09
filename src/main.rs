@@ -2,59 +2,62 @@
 extern crate rustacuda;
 
 use rustacuda::prelude::*;
-use rustacuda::memory::DeviceBox;
 use std::error::Error;
 use std::ffi::CString;
 
-pub trait Layer
-{
-    fn forward(&self);
-    fn backward(&self);
-}
+fn main() -> Result<(), Box<dyn Error>> {
+    // Set up the context, load the module, and create a stream to run kernels in.
+    rustacuda::init(CudaFlags::empty())?;
+    let device = Device::get_device(0)?;
+    let _ctx = Context::create_and_push(ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device)?;
 
-fn main() {
-    // Initialize the CUDA API
-    rustacuda::init(CudaFlags::empty()).unwrap();
-    
-    // Get the first device
-    let device = Device::get_device(0).unwrap();
+    let ptx = CString::new(include_str!("../ext/linear.ptx"))?;
+    let module = Module::load_from_string(&ptx)?;
+    let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-    // Create a context associated to this device
-    let context = Context::create_and_push(
-        ContextFlags::MAP_HOST | ContextFlags::SCHED_AUTO, device).unwrap();
+    // Create buffers for data
+    let mut in_x = DeviceBuffer::from_slice(&[1.0f32; 10])?;
+    let mut in_y = DeviceBuffer::from_slice(&[2.0f32; 10])?;
+    let mut out_1 = DeviceBuffer::from_slice(&[0.0f32; 10])?;
+    let mut out_2 = DeviceBuffer::from_slice(&[0.0f32; 10])?;
 
-    // Load the module containing the function we want to call
-    let module_data = CString::new(include_str!("../ext/linear.ptx")).unwrap();
-    println!("{:?}", module_data);
-    let module = Module::load_from_string(&module_data).unwrap();
-
-    // Create a stream to submit work to
-    let stream = Stream::new(StreamFlags::NON_BLOCKING, None).unwrap();
-
-    // Allocate space on the device and copy numbers to it.
-    let mut input = DeviceBox::new(&10.0f32).unwrap();
-    let mut weights = DeviceBox::new(&20.0f32).unwrap();
-    let mut bias = DeviceBox::new(&20.0f32).unwrap();
-    let mut result = DeviceBox::new(&0.0f32).unwrap();
-
-    // Launching kernels is unsafe since Rust can't enforce safety - think of kernel launches
-    // as a foreign-function call. In this case, it is - this kernel is written in CUDA C.
+    // This kernel adds each element in `in_x` and `in_y` and writes the result into `out`.
     unsafe {
-        // Launch the `sum` function with one block containing one thread on the given stream.
-        launch!(module.linear_forward<<<1, 1, 0, stream>>>(
-            input.as_device_ptr(),
-            weights.as_device_ptr(),
-	    bias.as_device_ptr(),
-            result.as_device_ptr()
-        )).unwrap();
+        // Launch the kernel with one block of one thread, no dynamic shared memory on `stream`.
+        let result = launch!(module.sum<<<1, 1, 0, stream>>>(
+            in_x.as_device_ptr(),
+            in_y.as_device_ptr(),
+            out_1.as_device_ptr(),
+            out_1.len()
+        ));
+        result?;
+
+        // Launch the kernel again using the `function` form:
+        let function_name = CString::new("sum")?;
+        let sum = module.get_function(&function_name)?;
+        // Launch with 1x1x1 (1) blocks of 10x1x1 (10) threads, to show that you can use tuples to
+        // configure grid and block size.
+        let result = launch!(sum<<<(1, 1, 1), (10, 1, 1), 0, stream>>>(
+            in_x.as_device_ptr(),
+            in_y.as_device_ptr(),
+            out_2.as_device_ptr(),
+            out_2.len()
+        ));
+        result?;
     }
 
-    // The kernel launch is asynchronous, so we wait for the kernel to finish executing
-    stream.synchronize().unwrap();
+    // Kernel launches are asynchronous, so we wait for the kernels to finish executing.
+    stream.synchronize()?;
 
-    // Copy the result back to the host
-    let mut result_host = 0.0f32;
-    result.copy_to(&mut result_host).unwrap();
-    
-    println!("Sum is {}", result_host);
+    // Copy the results back to host memory
+    let mut out_host = [0.0f32; 20];
+    out_1.copy_to(&mut out_host[0..10])?;
+    out_2.copy_to(&mut out_host[10..20])?;
+
+    for x in out_host.iter() {
+        assert_eq!(3.0 as u32, *x as u32);
+    }
+
+    println!("Launched kernel successfully.");
+    Ok(())
 }
