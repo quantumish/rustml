@@ -5,8 +5,11 @@ authors = ["David Freifeld <freifeld.david@gmail.com>"]
 edition = "2018"
 build = "build.rs"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
-rustacuda = "0.1"
-rustacuda_core = "0.1"
-rustacuda_derive = "0.1"
-anyhow = "1.0"
+cuda_std = "0.1.0"
+
+[build-dependencies]
+cuda_builder = "0.1.0"
